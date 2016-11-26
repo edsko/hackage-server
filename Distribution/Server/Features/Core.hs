@@ -230,7 +230,6 @@ data CoreResource = CoreResource {
 
     -- | Find a PackageId or PackageName inside a path.
     packageInPath :: forall m a. (MonadPlus m, FromReqURI a) => DynamicPath -> m a,
-
     -- | Find a tarball's PackageId from inside a path, doing some checking
     -- for consistency between the package and tarball.
     --

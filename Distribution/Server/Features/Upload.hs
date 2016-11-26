@@ -302,7 +302,6 @@ uploadFeature ServerEnv{serverBlobStore = store}
     guardAuthorisedAsMaintainerOrTrustee pkgname =
       guardAuthorised_ [InGroup (maintainersGroup pkgname), InGroup trusteesGroup]
 
-
     ----------------------------------------------------
 
     -- This is the upload function. It returns a generic result for multiple formats.
@@ -431,4 +430,3 @@ packageIdExistsModuloNormalisedVersion pkgs pkg =
         n vs' = case dropWhileEnd (== 0) vs' of
             []   -> [0]
             vs'' -> vs''
-

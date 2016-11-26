@@ -19,7 +19,7 @@ import Distribution.Server.Features.Votes
 import Distribution.Server.Features.Search
 import Distribution.Server.Features.Search as Search
 import Distribution.Server.Features.PreferredVersions
--- [reverse index disabled] import Distribution.Server.Features.ReverseDependencies
+import Distribution.Server.Features.ReverseDependencies
 import Distribution.Server.Features.PackageContents (PackageContentsFeature(..))
 import Distribution.Server.Features.PackageList
 import Distribution.Server.Features.Tags
@@ -39,14 +39,13 @@ import qualified Distribution.Server.Users.Users as Users
 import qualified Distribution.Server.Packages.PackageIndex as PackageIndex
 import Distribution.Server.Users.Group (UserGroup(..))
 import Distribution.Server.Features.Distro.Distributions (DistroPackageInfo(..))
--- [reverse index disabled] import Distribution.Server.Packages.Reverse
 
 import qualified Distribution.Server.Pages.Package as Pages
 import qualified Distribution.Server.Pages.PackageFromTemplate as PagesNew
 import Distribution.Server.Pages.Template
 import Distribution.Server.Pages.Util
+import Distribution.Server.Pages.Reverse
 import qualified Distribution.Server.Pages.Group as Pages
--- [reverse index disabled] import qualified Distribution.Server.Pages.Reverse as Pages
 import qualified Distribution.Server.Pages.Index as Pages
 import Distribution.Server.Util.CountingMap (cmFind, cmToList)
 import Distribution.Server.Util.ServeTarball (loadTarEntry)
@@ -60,7 +59,6 @@ import Distribution.PackageDescription
 import Data.List (intercalate, intersperse, insert, sortBy)
 import Data.Function (on)
 import qualified Data.Map as Map
-import Data.Set (Set)
 import qualified Data.Set as Set
 import qualified Data.Vector as Vec
 import Data.Maybe (fromMaybe, isJust)
@@ -72,8 +70,6 @@ import Data.Array (Array, listArray)
 import qualified Data.Array as Array
 import qualified Data.Ix    as Ix
 import Data.Time.Format (formatTime)
-import Data.Time.Clock (getCurrentTime)
-import qualified Data.Time.Format.Human as HumanTime
 import Data.Time.Locale.Compat (defaultTimeLocale)
 import qualified Data.ByteString.Lazy as BS (ByteString)
 
@@ -107,7 +103,7 @@ initHtmlFeature :: ServerEnv
                     -> PackageContentsFeature
                     -> UploadFeature -> PackageCandidatesFeature
                     -> VersionsFeature
-                    -- [reverse index disabled] -> ReverseFeature
+                    -> ReverseFeature
                     -> TagsFeature -> DownloadFeature
                     -> VotesFeature
                     -> ListFeature -> SearchFeature
@@ -131,13 +127,16 @@ initHtmlFeature env@ServerEnv{serverTemplatesDir, serverTemplatesMode,
                    , "distro-monitor.html"
                    , "revisions.html"
                    , "package-page.html"
+                   , "table-interface.html"
+                   , "tag-edit.html"
+                   , "graph.html"
                    ]
 
 
     return $ \user core@CoreFeature{packageChangeHook}
               packages upload
               candidates versions
-              -- [reverse index disabled] reverse
+              reversef
               tags download
               rank
               list@ListFeature{itemUpdate}
@@ -152,6 +151,7 @@ initHtmlFeature env@ServerEnv{serverTemplatesDir, serverTemplatesMode,
                 htmlFeature env user core
                             packages upload
                             candidates versions
+                            reversef
                             tags download
                             rank
                             list names
@@ -160,7 +160,8 @@ initHtmlFeature env@ServerEnv{serverTemplatesDir, serverTemplatesMode,
                             tarIndexCache
                             reportsCore
                             usersdetails
-                            (htmlUtilities core tags)
+                            (htmlUtilities core tags user)
+                            (reverseHtmlUtil reversef)
                             mainCache namesCache
                             templates
 
@@ -196,6 +197,7 @@ htmlFeature :: ServerEnv
             -> UploadFeature
             -> PackageCandidatesFeature
             -> VersionsFeature
+            -> ReverseFeature
             -> TagsFeature
             -> DownloadFeature
             -> VotesFeature
@@ -209,6 +211,7 @@ htmlFeature :: ServerEnv
             -> ReportsFeature
             -> UserDetailsFeature
             -> HtmlUtilities
+            -> ReverseHtmlUtil
             -> AsyncCache Response
             -> AsyncCache Response
             -> Templates
@@ -219,7 +222,7 @@ htmlFeature env@ServerEnv{..}
             core@CoreFeature{queryGetPackageIndex}
             packages upload
             candidates versions
-            -- [reverse index disabled] ReverseFeature{..}
+            revf@ReverseFeature{..}
             tags download
             rank
             list@ListFeature{getAllLists}
@@ -230,6 +233,7 @@ htmlFeature env@ServerEnv{..}
             reportsCore
             usersdetails
             utilities@HtmlUtilities{..}
+            reverseH@ReverseHtmlUtil{..}
             cachePackagesPage cacheNamesPage
             templates
   = (HtmlFeature{..}, packageIndex, packagesPage)
@@ -266,10 +270,14 @@ htmlFeature env@ServerEnv{..}
                                       distros
                                       packages
                                       htmlTags
+                                      htmlReverse
+                                      revf
                                       htmlPreferred
                                       cachePackagesPage
                                       cacheNamesPage
                                       templates
+                                      list
+                                      names
     htmlUsers      = mkHtmlUsers      user usersdetails
     htmlUploads    = mkHtmlUploads    utilities upload
     htmlDocUploads = mkHtmlDocUploads utilities core docsCore templates
@@ -279,8 +287,9 @@ htmlFeature env@ServerEnv{..}
                                       docsCandidates tarIndexCache
                                       candidates templates
     htmlPreferred  = mkHtmlPreferred  utilities core versions
-    htmlTags       = mkHtmlTags       utilities core list tags
-    htmlSearch     = mkHtmlSearch     utilities core list names
+    htmlTags       = mkHtmlTags       utilities core upload user list tags templates
+    htmlReverse    = mkHtmlReverse    utilities core versions list revf reverseH
+    htmlSearch     = mkHtmlSearch     utilities core list names templates
 
     htmlResources = concat [
         htmlCoreResources       htmlCore
@@ -292,6 +301,7 @@ htmlFeature env@ServerEnv{..}
       , htmlPreferredResources  htmlPreferred
       , htmlDownloadsResources  htmlDownloads
       , htmlTagsResources       htmlTags
+      , htmlReverseResource     htmlReverse
       , htmlSearchResources     htmlSearch
       -- and user groups. package maintainers, trustees, admins
       , htmlGroupResource user (maintainersGroupResource . uploadResource $ upload)
@@ -327,74 +337,6 @@ htmlFeature env@ServerEnv{..}
             resourceGet = [("html", serveDistroPackage)]
           }
       -}
-
-
-      -- reverse index (disabled)
-      {-
-      , (extendResource $ reversePackage reverses) {
-            resourceGet = [("html", serveReverse True)]
-          }
-      , (extendResource $ reversePackageOld reverses) {
-            resourceGet = [("html", serveReverse False)]
-          }
-      , (extendResource $ reversePackageAll reverses) {
-            resourceGet = [("html", serveReverseFlat)]
-          }
-      , (extendResource $ reversePackageStats reverses) {
-            resourceGet = [("html", serveReverseStats)]
-          }
-      , (extendResource $ reversePackages reverses) {
-            resourceGet = [("html", serveReverseList)]
-          }
-      -}
-
-
-
-    -- [reverse index disabled] reverses = reverseResource
-
-
-
-
-
-
-    {- [reverse index disabled]
-    --------------------------------------------------------------------------------
-    -- Reverse
-    serveReverse :: Bool -> DynamicPath -> ServerPart Response
-    serveReverse isRecent dpath =
-      htmlResponse $
-      withPackageId dpath $ \pkgid -> do
-        let pkgname = packageName pkgid
-        rdisp <- case packageVersion pkgid of
-                  Version [] [] -> withPackageAll pkgname   $ \_ -> revPackageName pkgname
-                  _             -> withPackageVersion pkgid $ \_ -> revPackageId pkgid
-        render <- (if isRecent then renderReverseRecent else renderReverseOld) pkgname rdisp
-        return $ toResponse $ Resource.XHtml $ hackagePage (display pkgname ++ " - Reverse dependencies ") $
-            Pages.reversePackageRender pkgid (corePackageIdUri "") revr isRecent render
-
-    serveReverseFlat :: DynamicPath -> ServerPart Response
-    serveReverseFlat dpath = htmlResponse $
-                                      withPackageAllPath dpath $ \pkgname _ -> do
-        revCount <- query $ GetReverseCount pkgname
-        pairs <- revPackageFlat pkgname
-        return $ toResponse $ Resource.XHtml $ hackagePage (display pkgname ++ "Flattened reverse dependencies") $
-            Pages.reverseFlatRender pkgname (corePackageNameUri "") revr revCount pairs
-
-    serveReverseStats :: DynamicPath -> ServerPart Response
-    serveReverseStats dpath = htmlResponse $
-                                       withPackageAllPath dpath $ \pkgname pkgs -> do
-        revCount <- query $ GetReverseCount pkgname
-        return $ toResponse $ Resource.XHtml $ hackagePage (display pkgname ++ "Reverse dependency statistics") $
-            Pages.reverseStatsRender pkgname (map packageVersion pkgs) (corePackageIdUri "") revr revCount
-
-    serveReverseList :: DynamicPath -> ServerPart Response
-    serveReverseList _ = do
-        let revr = reverseResource revs
-        triple <- sortedRevSummary revs
-        hackCount <- PackageIndex.indexSize <$> queryGetPackageIndex
-        return $ toResponse $ Resource.XHtml $ hackagePage "Reverse dependencies" $
-            Pages.reversePackagesRender (corePackageNameUri "") revr hackCount triple
-    -}
 
     --------------------------------------------------------------------------------
     -- Additional package indices
@@ -437,7 +379,8 @@ htmlFeature env@ServerEnv{..}
 
 {-------------------------------------------------------------------------------
   Core
--------------------------------------------------------------------------------}
+------------------------------------------------------------------------------
+-}
 
 data HtmlCore = HtmlCore {
     htmlCoreResources :: [Resource]
@@ -458,15 +401,19 @@ mkHtmlCore :: ServerEnv
            -> DistroFeature
            -> PackageContentsFeature
            -> HtmlTags
+           -> HtmlReverse
+           -> ReverseFeature
            -> HtmlPreferred
            -> AsyncCache Response
            -> AsyncCache Response
            -> Templates
+           -> ListFeature
+           -> SearchFeature
            -> HtmlCore
 mkHtmlCore ServerEnv{serverBaseURI}
            utilities@HtmlUtilities{..}
-           UserFeature{queryGetUserDb}
-           CoreFeature{coreResource}
+           UserFeature{queryGetUserDb, checkAuthenticated}
+           CoreFeature{coreResource , queryGetPackageIndex}
            VersionsFeature{ versionsResource
                           , queryGetDeprecatedFor
                           , queryGetPreferredInfo
@@ -482,10 +429,14 @@ mkHtmlCore ServerEnv{serverBaseURI}
            DistroFeature{queryPackageStatus}
            PackageContentsFeature{packageRender}
            HtmlTags{..}
+           HtmlReverse{..}
+           ReverseFeature{queryReverseDeps, revJSON}
            HtmlPreferred{..}
            cachePackagesPage
            cacheNamesPage
            templates
+           ListFeature{makeItemList}
+           SearchFeature{..}
   = HtmlCore{..}
   where
     cores@CoreResource{packageInPath, lookupPackageName, lookupPackageId} = coreResource
@@ -513,6 +464,23 @@ mkHtmlCore ServerEnv{serverBaseURI}
       , (resourceAt "/packages/names" ) {
             resourceGet = [("html", const $ readAsyncCache cacheNamesPage)]
           }
+      , (resourceAt "/packages/browse" ) {
+            resourceDesc = [(GET, "Show browsable list of all packages")]
+        , resourceGet = [("html",
+                serveBrowsePage)]
+          }
+      , (resourceAt "/packages/graph.json" ) {
+            resourceDesc = [(GET, "Show JSON of package dependency information")]
+        , resourceGet = [("json",
+                serveGraphJSON)]
+          }
+
+      , (resourceAt "/packages/graph" ) {
+            resourceDesc = [(GET, "Show graph of package dependency information")]
+        , resourceGet = [("html",
+                serveGraph)]
+          }
+
       , (extendResource $ corePackagesPage cores) {
             resourceDesc = [(GET, "Show package index")]
           , resourceGet  = [("html", const $ readAsyncCache cachePackagesPage)]
@@ -541,16 +509,24 @@ mkHtmlCore ServerEnv{serverBaseURI}
         let realpkg = rendPkgId render
             pkgname = packageName realpkg
             docURL  = packageDocsContentUri docs realpkg
-
+            execs   = rendExecNames render
         prefInfo      <- queryGetPreferredInfo pkgname
         distributions <- queryPackageStatus pkgname
         totalDown     <- cmFind pkgname `liftM` totalPackageDownloads
         recentDown    <- cmFind pkgname `liftM` recentPackageDownloads
-        pkgVotesHtml  <- renderVotesHtml pkgname
+        pkgVotes      <- pkgNumVotes pkgname
+        pkgScore      <- fmap (/2) $ pkgNumScore pkgname
+        auth          <- checkAuthenticated
+        userRating    <- case auth of Just (uid,_) -> pkgUserVote pkgname uid; _ -> return Nothing
         mdoctarblob   <- queryDocumentation realpkg
+        rdeps         <- queryReverseDeps pkgname
         tags          <- queryTagsForPackage pkgname
         deprs         <- queryGetDeprecatedFor pkgname
         mreadme       <- makeReadme render
+        pkgnames <- searchPackages [unPackageName pkgname]
+        let (pageResults, moreResults) = splitAt 5 pkgnames
+        pkgDetails <- liftIO $ makeItemList pageResults
+        let related = toHtml $ resultsArea pkgDetails moreResults (unPackageName pkgname)
 
         buildStatus   <- renderBuildStatus
           documentationFeature reportsFeature realpkg
@@ -566,14 +542,21 @@ mkHtmlCore ServerEnv{serverBaseURI}
 
         return $ toResponse . template $
           -- IO-related items
-          [ "baseurl"           $= show (serverBaseURI)
+          [ "baseurl"           $= show serverBaseURI
           , "cabalVersion"      $= display cabalVersion
-          , "tags"              $= (renderTags tags)
-          , "versions"          $= (PagesNew.renderVersion realpkg
-              (classifyVersions prefInfo $ map packageVersion pkgs) infoUrl)
+          , "tags"              $= renderTags tags
+          , "versions"          $= PagesNew.renderVersion realpkg
+              (classifyVersions prefInfo $ map packageVersion pkgs) infoUrl
           , "totalDownloads"    $= totalDown
+          , "hasexecs"          $= not (null execs)
           , "recentDownloads"   $= recentDown
-          , "votesSection"      $= pkgVotesHtml
+          , "votes"             $= pkgVotes
+          , "userRating"        $= userRating
+          , "score"             $= pkgScore
+          , "related"           $= related
+          , "hasrdeps"          $= not (rdeps == ([],[]))
+          , "rdeps"             $= renderPkgPageDeps rdeps
+          , "rdepsummary"       $= renderDeps pkgname rdeps
           , "buildStatus"       $= buildStatus
           ] ++
           -- Items not related to IO (mostly pure functions)
@@ -583,6 +566,22 @@ mkHtmlCore ServerEnv{serverBaseURI}
             deprs
             utilities
           where
+            resultsArea pkgDetails moreResults termsStr =
+                [ case pkgDetails of
+                    [] -> toHtml "No matches"
+                    _  -> toHtml
+                          [ thediv << (intersperse (toHtml ", ") $ map (packageNameLink . itemName) (tail pkgDetails))
+                          , if null moreResults
+                              then noHtml
+                              else anchor ! [href moreResultsLink]
+                                         << "More results..."
+                          ]
+                ]
+              where
+                moreResultsLink =
+                    "/packages/search?"
+                 ++ "terms="   ++ escapeURIString isUnreserved termsStr
+
             makeReadme :: MonadIO m => PackageRender -> m (Maybe BS.ByteString)
             makeReadme render = case rendReadme render of
               Just (tarfile, _, offset, _) ->
@@ -609,6 +608,35 @@ mkHtmlCore ServerEnv{serverBaseURI}
         [ "pkgname"  $= pkgname
         , "versions" $= map packageId pkgs
         ]
+
+
+    serveBrowsePage :: DynamicPath -> ServerPartE Response
+    serveBrowsePage _ = do
+      pkgIndex <- queryGetPackageIndex
+      let packageNames = Pages.toPackageNames pkgIndex
+      pkgDetails <- liftIO $ makeItemList packageNames
+      let rowList = map makeRow pkgDetails
+          tabledata = "" +++ rowList +++ ""
+      cacheControl [Public, maxAgeHours 1]
+                   (etagFromHash (PackageIndex.indexSize pkgIndex))
+      template <- getTemplate templates "table-interface.html"
+      return $ toResponse $ template
+        [ "heading"   $= "All packages"
+        , "content"   $= "A browsable index of all the packages"
+        , "tabledata" $= tabledata ]
+
+    serveGraphJSON :: DynamicPath -> ServerPartE Response
+    serveGraphJSON _ = do
+        graph <- revJSON
+        --TODO: use proper type for graph with ETag
+        cacheControl [Public, maxAgeMinutes 30] (etagFromHash graph)
+        ok . toResponse $ graph
+
+    serveGraph :: DynamicPath -> ServerPartE Response
+    serveGraph _ = do
+      cacheControlWithoutETag [Public, maxAgeDays 1] -- essentially static
+      template <- getTemplate templates "graph.html"
+      return $ toResponse $ template []
 
     serveDistroMonitorPage :: DynamicPath -> ServerPartE Response
     serveDistroMonitorPage dpath = do
@@ -661,7 +689,8 @@ mkHtmlCore ServerEnv{serverBaseURI}
 
 {-------------------------------------------------------------------------------
   Users
--------------------------------------------------------------------------------}
+------------------------------------------------------------------------------
+-}
 
 data HtmlUsers = HtmlUsers {
     htmlUsersResources :: [Resource]
@@ -775,7 +804,8 @@ mkHtmlUsers UserFeature{..} UserDetailsFeature{..} = HtmlUsers{..}
 
 {-------------------------------------------------------------------------------
   Uploads
--------------------------------------------------------------------------------}
+------------------------------------------------------------------------------
+-}
 
 data HtmlUploads = HtmlUploads {
     htmlUploadsResources :: [Resource]
@@ -823,7 +853,8 @@ mkHtmlUploads HtmlUtilities{..} UploadFeature{..} = HtmlUploads{..}
 
 {-------------------------------------------------------------------------------
   Documentation uploads
--------------------------------------------------------------------------------}
+------------------------------------------------------------------------------
+-}
 
 data HtmlDocUploads = HtmlDocUploads {
     htmlDocUploadsResources :: [Resource]
@@ -870,7 +901,8 @@ mkHtmlDocUploads HtmlUtilities{..} CoreFeature{coreResource} DocumentationFeatur
 
 {-------------------------------------------------------------------------------
   Build reports
--------------------------------------------------------------------------------}
+------------------------------------------------------------------------------
+-}
 
 data HtmlReports = HtmlReports {
     htmlReportsResources :: [Resource]
@@ -916,7 +948,8 @@ mkHtmlReports HtmlUtilities{..} CoreFeature{..} ReportsFeature{..} templates = H
 
 {-------------------------------------------------------------------------------
   Candidates
--------------------------------------------------------------------------------}
+------------------------------------------------------------------------------
+-}
 
 data HtmlCandidates = HtmlCandidates {
     htmlCandidatesResources :: [Resource]
@@ -1173,7 +1206,8 @@ dependenciesPage isCandidate render =
 
 {-------------------------------------------------------------------------------
   Preferred versions
--------------------------------------------------------------------------------}
+------------------------------------------------------------------------------
+-}
 
 data HtmlPreferred = HtmlPreferred {
     htmlPreferredResources :: [Resource]
@@ -1391,7 +1425,8 @@ mkHtmlPreferred HtmlUtilities{..}
 
 {-------------------------------------------------------------------------------
   Downloads
--------------------------------------------------------------------------------}
+------------------------------------------------------------------------------
+-}
 
 data HtmlDownloads = HtmlDownloads {
     htmlDownloadsResources :: [Resource]
@@ -1421,7 +1456,7 @@ mkHtmlDownloads HtmlUtilities{..} DownloadFeature{..} = HtmlDownloads{..}
             [ tr << [ th << "Package name", th << "Downloads" ] ] ++
             [ tr ! [theclass (if odd n then "odd" else "even")] <<
                 [ td << packageNameLink pkgname
-                , td << [ toHtml $ (show count) ] ]
+                , td << [ toHtml (show count) ] ]
             | ((pkgname, count), n) <- zip pkgList [(1::Int)..] ]
 
     sortedPackages :: RecentDownloads -> [(PackageName, Int)]
@@ -1429,7 +1464,8 @@ mkHtmlDownloads HtmlUtilities{..} DownloadFeature{..} = HtmlDownloads{..}
 
 {-------------------------------------------------------------------------------
   Tags
--------------------------------------------------------------------------------}
+------------------------------------------------------------------------------
+-}
 
 data HtmlTags = HtmlTags {
     htmlTagsResources :: [Resource]
@@ -1438,17 +1474,24 @@ data HtmlTags = HtmlTags {
 
 mkHtmlTags :: HtmlUtilities
            -> CoreFeature
+           -> UploadFeature
+           -> UserFeature
            -> ListFeature
            -> TagsFeature
+           -> Templates
            -> HtmlTags
 mkHtmlTags HtmlUtilities{..}
            CoreFeature{ coreResource = CoreResource{
                           packageInPath
-                        , lookupPackageName
+                        , guardValidPackageName
                         }
                       }
-           ListFeature{makeItemList}
-           TagsFeature{..} = HtmlTags{..}
+           UploadFeature{ maintainersGroup, trusteesGroup }
+           UserFeature{ guardAuthorised', guardAuthorised_ }
+           ListFeature{ makeItemList }
+           TagsFeature{..}
+           templates
+           = HtmlTags{..}
   where
     tags = tagsResource
 
@@ -1464,7 +1507,13 @@ mkHtmlTags HtmlUtilities{..}
             resourceGet = [("html", serveTagListing)]
           }
       , (extendResource $ packageTagsListing tags) {
-            resourcePut = [("html", putPackageTags)], resourceGet = []
+            resourcePut = [("html", putPackageTags)], resourceGet = [("html", showPackageTags)]
+          }
+      , (extendResource $ tagAliasEdit tags) {
+            resourcePut = [("html", putAliasEdit)]
+          }
+      , (extendResource $ tagAliasEditForm tags) {
+            resourceGet = [("html", serveAliasForm)]
           }
       , tagEdit -- (extendResource $ packageTagsEdit tags) { resourceGet = [("html", serveTagsForm)] }
       ]
@@ -1474,12 +1523,12 @@ mkHtmlTags HtmlUtilities{..}
         tagList <- queryGetTagList
         let withCounts = filter ((>0) . snd) . map (\(tg, pkgs) -> (tg, Set.size pkgs)) $ tagList
             countSort = sortBy (flip compare `on` snd) withCounts
-        return $ toResponse $ Resource.XHtml $ hackagePage "Hackage tags" $
+        return $ toResponse $ Resource.XHtml $ hackagePage "Hackage tags"
           [ h2 << "Hackage tags"
           , h4 << "By name"
-          , paragraph ! [theclass "toc"] << (intersperse (toHtml ", ") $ map (tagItem . fst) withCounts)
+          , paragraph ! [theclass "toc"] << intersperse (toHtml ", ") (map (tagItem . fst) withCounts)
           , h4 << "By frequency"
-          , paragraph ! [theclass "toc"] << (intersperse (toHtml ", ") $ map (toHtml . tagCountItem) countSort)
+          , paragraph ! [theclass "toc"] << intersperse (toHtml ", ") (map (toHtml . tagCountItem) countSort)
           ]
       where tagCountItem (tg, count) =
               [ tagItem tg
@@ -1487,24 +1536,59 @@ mkHtmlTags HtmlUtilities{..}
               ]
             tagItem tg = anchor ! [href $ tagUri tags "" tg] << display tg
 
+    putAliasEdit :: DynamicPath -> ServerPartE Response
+    putAliasEdit dpath = do
+        tagname <- tagInPath dpath
+        targetTag <- optional $ look "tags"
+        mergeTags targetTag (Tag tagname)
+        return $ toResponse $ Resource.XHtml $ hackagePage "Merged Tag"
+            [ h2 << "Merged tag"
+            , toHtml "Return to "
+            , anchor ! [href "/packages/tags"] << "tag listings"
+            ]
+
+    serveAliasForm :: DynamicPath -> ServerPartE Response
+    serveAliasForm dpath = do
+        tagname <- tagInPath dpath
+        guardAuthorised_ [InGroup trusteesGroup]
+
+        let aliasForm = [ thediv ! [theclass "box"] <<
+                            [h2 << ("Merge Tag " ++ tagname)
+                            , form ! [XHtml.method "post", action ("/packages/tag/" ++ tagname ++ "/alias")] <<
+                                [ hidden "_method" "PUT"
+                                , input ! [value "", name "tags", identifier "tags"]
+                                , toHtml " (Tag to merge with) ", br
+                                , input ! [thetype "submit", value "Merge"]
+                                ]
+                            ]
+                        ]
+        return $ toResponse $ Resource.XHtml $ hackagePage ("Merge Tag " ++ tagname) aliasForm
+
     serveTagListing :: DynamicPath -> ServerPartE Response
-    serveTagListing dpath =
+    serveTagListing dpath = do
+      tagname <- tagInPath dpath
       withTagPath dpath $ \tg pkgnames -> do
         let tagd = "Packages tagged " ++ display tg
             pkgs = Set.toList pkgnames
         items <- liftIO $ makeItemList pkgs
-        let (mtag, histogram) = Map.updateLookupWithKey (\_ _ -> Nothing) tg $ tagHistogram items
+        let rowList = map makeRow items
+            (mtag, histogram) = Map.updateLookupWithKey (\_ _ -> Nothing) tg $ tagHistogram items
             -- make a 'related tags' section, so exclude this tag from the histogram
             count = fromMaybe 0 mtag
-        return $ toResponse $ Resource.XHtml $ hackagePage tagd $
-          [ h2 << tagd
-          , case items of
+        template <- getTemplate templates "table-interface.html"
+        return $ toResponse $ template
+          [ "heading"   $= tagd
+          , "content"   $=  case items of
                 [] -> toHtml "No packages have this tag."
                 _  -> toHtml
                   [ paragraph << [if count==1 then "1 package has" else show count ++ " packages have", " this tag."]
+                  , anchor ! [href $  tagname ++ "/alias/edit"] << "[Merge tag]"
+                  , toHtml " (trustees only)"
                   , paragraph ! [theclass "toc"] << [toHtml "Related tags: ", toHtml $ showHistogram histogram]
-                  , ulist ! [theclass "packages"] << map renderItem items ]
+                  ]
+          , "tabledata" $= rowList
           ]
+
      where
       showHistogram hist = (++takeHtml) . intersperse (toHtml ", ") $
             map histogramEntry $ take takeAmount sortHist
@@ -1517,28 +1601,60 @@ mkHtmlTags HtmlUtilities{..}
     putPackageTags :: DynamicPath -> ServerPartE Response
     putPackageTags dpath = do
       pkgname <- packageInPath dpath
-      _       <- lookupPackageName pkgname -- TODO: necessary?
-      putTags pkgname
-      return $ toResponse $ Resource.XHtml $ hackagePage "Set tags"
-          [toHtml "Put tags for ", packageNameLink pkgname]
+      guardValidPackageName pkgname
+      addns <- optional $ look "addns"
+      delns <- optional $ look "delns"
+      raddns <- optional $ look "raddns"
+      rdelns <- optional $ look "rdelns"
+
+      putTags addns delns raddns rdelns pkgname
+      currTags <- queryTagsForPackage pkgname
+      revTags <- queryReviewTagsForPackage pkgname
+      let disp = renderReviewTags currTags revTags pkgname
+      return $ toResponse $ Resource.XHtml $ hackagePage "Package Tags" disp
+
+    showPackageTags :: DynamicPath -> ServerPartE Response
+    showPackageTags dpath = do
+      pkgname <- packageInPath dpath
+      currTags <- queryTagsForPackage pkgname
+      revTags <- queryReviewTagsForPackage pkgname
+      let disp = renderReviewTags currTags revTags pkgname
+      return $ toResponse $ Resource.XHtml $ hackagePage "Package Tags" disp
 
     -- serve form for editing, to be received by putTags
     serveTagsForm :: DynamicPath -> ServerPartE Response
     serveTagsForm dpath = do
       pkgname <- packageInPath dpath
       currTags <- queryTagsForPackage pkgname
-      let tagsStr = concat . intersperse ", " . map display . Set.toList $ currTags
-      return $ toResponse $ Resource.XHtml $ hackagePage "Edit package tags"
-        [paragraph << [toHtml "Set tags for ", packageNameLink pkgname],
-         form ! [theclass "box", XHtml.method "post", action $ packageTagsUri tags "" pkgname] <<
-          [ hidden "_method" "PUT"
-          , dlist . ddef . toHtml $ makeInput [thetype "text", value tagsStr] "tags" "Set tags to "
-          , paragraph << input ! [thetype "submit", value "Set tags"]
-          ]]
+      revTags <- queryReviewTagsForPackage pkgname
+      template <- getTemplate templates "tag-edit.html"
+      let toStr = intercalate ", " . map display . Set.toList
+          tagsStr = toStr currTags
+          addns = toStr $ fst  revTags
+          delns = toStr $ snd  revTags
+      trustainer <- guardAuthorised' [InGroup (maintainersGroup pkgname), InGroup trusteesGroup]
+      user <- guardAuthorised' [AnyKnownUser]
+      if trustainer || user
+        then return $ toResponse . template $
+          [ "pkgname"           $= display pkgname
+          , "addns"             $= addns
+          , "tags"              $= tagsStr
+          , "delns"             $= delns
+          , "istrustee"         $= trustainer
+          , "isuser"            $= not trustainer
+          ]
+        else return $ toResponse $ Resource.XHtml $ hackagePage "Error" [h2 << "Authorization Error"
+                                                                            , paragraph << "You need to be logged in to propose tags"]
+
+-- | Find a TagName inside a path.
+tagInPath :: forall m a. (MonadPlus m, FromReqURI a) => DynamicPath -> m a
+tagInPath dpath = maybe mzero return (lookup "tag" dpath >>= fromReqURI)
+
 
 {-------------------------------------------------------------------------------
   Search
--------------------------------------------------------------------------------}
+------------------------------------------------------------------------------
+-}
 
 data HtmlSearch = HtmlSearch {
     htmlSearchResources :: [Resource]
@@ -1548,11 +1664,14 @@ mkHtmlSearch :: HtmlUtilities
              -> CoreFeature
              -> ListFeature
              -> SearchFeature
+             -> Templates
              -> HtmlSearch
 mkHtmlSearch HtmlUtilities{..}
              CoreFeature{..}
              ListFeature{makeItemList}
-             SearchFeature{..} =
+             SearchFeature{..}
+             templates =
+
     HtmlSearch{..}
   where
     htmlSearchResources = [
@@ -1563,10 +1682,10 @@ mkHtmlSearch HtmlUtilities{..}
 
     servePackageFind :: DynamicPath -> ServerPartE Response
     servePackageFind _ = do
-        (mtermsStr, offset, limit, mexplain) <-
-          queryString $ (,,,) <$> optional (look "terms")
-                              <*> mplus (lookRead "offset") (pure 0)
-                              <*> mplus (lookRead "limit") (pure 100)
+        (mtermsStr,  mexplain) <-
+          queryString $ (,) <$> optional (look "terms")
+                              -- <*> mplus (lookRead "offset") (pure 0)
+                              -- <*> mplus (lookRead "limit") (pure 100)
                               <*> optional (look "explain")
         let explain = isJust mexplain
         case mtermsStr of
@@ -1581,18 +1700,23 @@ mkHtmlSearch HtmlUtilities{..}
                 , toHtml $ explainResults results
                 ]
 
-          Just termsStr | terms <- words termsStr, not (null terms) -> do
-            pkgIndex <- liftIO $ queryGetPackageIndex
-            currentTime <- liftIO $ getCurrentTime
-            pkgnames <- searchPackages terms
-            let (pageResults, moreResults) = splitAt limit (drop offset pkgnames)
-            pkgDetails <- liftIO $ makeItemList pageResults
-            return $ toResponse $ Resource.XHtml $
-              hackagePage "Package search" $
-                [ toHtml $ searchForm termsStr False
-                , toHtml $ resultsArea pkgIndex currentTime pkgDetails offset limit moreResults termsStr
-                , alternativeSearchTerms termsStr
-                ]
+          Just termsStr | terms <- words termsStr -> do
+            -- pkgIndex <- liftIO $ queryGetPackageIndex
+            -- currentTime <- liftIO $ getCurrentTime
+            pkgnames <- if null terms
+                        then fmap Pages.toPackageNames queryGetPackageIndex
+                        else searchPackages terms
+            -- let (pageResults, moreResults) = splitAt limit (drop offset pkgnames)
+            pkgDetails <- liftIO $ makeItemList pkgnames
+
+            let rowList = map makeRow pkgDetails
+                tabledata = "" +++ rowList
+            template <- getTemplate templates "table-interface.html"
+            return $ toResponse $ template
+              [ "heading"   $= toHtml (searchForm termsStr False)
+              , "content"   $= "A browsable index of all the packages"
+              , "tabledata" $= tabledata
+              , "footer"    $= alternativeSearchTerms termsStr]
 
           _ ->
             return $ toResponse $ Resource.XHtml $
@@ -1601,55 +1725,6 @@ mkHtmlSearch HtmlUtilities{..}
                 , alternativeSearch
                 ]
       where
-        resultsArea pkgIndex currentTime pkgDetails offset limit moreResults termsStr =
-            [ h2 << "Results"
-            , if offset == 0
-                then noHtml
-                else paragraph << ("(" ++ show (fst range + 1) ++ " to "
-                                       ++ show (snd range) ++ ")")
-            , case pkgDetails of
-                [] | offset == 0 -> toHtml "None"
-                   | otherwise   -> toHtml "No more results"
-                _ -> toHtml
-                      [ ulist ! [theclass "searchresults"]
-                             << map renderSearchResult pkgDetails
-                      , if null moreResults
-                          then noHtml
-                          else anchor ! [href moreResultsLink]
-                                     << "More results..."
-                      ]
-            ]
-          where
-            renderSearchResult :: PackageItem -> Html
-            renderSearchResult item = li ! classes <<
-              [ packageNameLink pkgname
-              , toHtml $ " " ++ ptype
-              , br
-              , toHtml (itemDesc item)
-              , br
-              , small ! [ theclass "info" ] <<
-                [ toHtml (renderTags (itemTags item))
-                , " Last uploaded " +++ humanTime ]
-              ]
-              where
-                pkgname   = itemName item
-                timestamp = maximum
-                          $ map pkgOriginalUploadTime
-                          $ PackageIndex.lookupPackageName pkgIndex pkgname
-                -- takes current time as argument so it can say how many $X ago something was
-                humanTime = HumanTime.humanReadableTime' currentTime timestamp
-                ptype = packageType (itemHasLibrary item) (itemNumExecutables item)
-                                    (itemNumTests item) (itemNumBenchmarks item)
-                classes = case classList of [] -> []; _ -> [theclass $ unwords classList]
-                classList = (case itemDeprecated item of Nothing -> []; _ -> ["deprecated"])
-
-            range = (offset, offset + length pkgDetails)
-            moreResultsLink =
-                "/packages/search?"
-             ++ "terms="   ++ escapeURIString isUnreserved termsStr
-             ++ "&offset=" ++ show (offset + limit)
-             ++ "&limit="  ++ show limit
-
         searchForm termsStr explain =
           [ h2 << "Package search"
           , form ! [XHtml.method "GET", action "/packages/search"] <<
@@ -1768,8 +1843,8 @@ mkHtmlSearch HtmlUtilities{..}
         resetParamsForm termsStr =
           let SearchRankParameters{..} = defaultSearchRankParameters in
           form ! [XHtml.method "GET", action "/packages/search"] <<
-            (concat $
-              [ input ! [ thetype "submit", value "Reset parameters" ]
+            concat
+             ([ input ! [ thetype "submit", value "Reset parameters" ]
               , input ! [ thetype "hidden", name "terms", value termsStr ]
               , input ! [ thetype "hidden", name "explain" ]
               , input ! [ thetype "hidden", name "k1", value (show paramK1) ] ]
@@ -1797,7 +1872,8 @@ mkHtmlSearch HtmlUtilities{..}
 
 {-------------------------------------------------------------------------------
   Groups
--------------------------------------------------------------------------------}
+------------------------------------------------------------------------------
+-}
 
 htmlGroupResource :: UserFeature -> GroupResource -> [Resource]
 htmlGroupResource UserFeature{..} r@(GroupResource groupR userR getGroup) =
@@ -1848,3 +1924,86 @@ htmlGroupResource UserFeature{..} r@(GroupResource groupR userR getGroup) =
         groupDeleteUser group dpath
         goToList dpath
     goToList dpath = seeOther (renderResource' (groupResource r) dpath) (toResponse ())
+
+{- Reverse Resource
+-}
+
+data HtmlReverse = HtmlReverse {
+    htmlReverseResource :: [Resource]
+  }
+
+mkHtmlReverse :: HtmlUtilities
+              -> CoreFeature
+              -> VersionsFeature
+              -> ListFeature
+              -> ReverseFeature
+              -> ReverseHtmlUtil
+              -> HtmlReverse
+mkHtmlReverse HtmlUtilities{..}
+           CoreFeature{ coreResource = CoreResource{
+                          packageInPath
+                        , lookupPackageName
+                        , corePackageIdUri
+                        , corePackageNameUri
+                        },
+                        queryGetPackageIndex
+                      }
+           VersionsFeature{withPackageVersion}
+           ListFeature{}
+           ReverseFeature{..}
+           ReverseHtmlUtil{..}
+           = HtmlReverse{..}
+  where
+    htmlReverseResource = [
+        (extendResource $ reversePackage reverseResource) {
+            resourceGet = [("html", serveReverse True)]
+          }
+      , (extendResource $ reversePackageOld reverseResource) {
+            resourceGet = [("html", serveReverse False)]
+          }
+      ,(extendResource $ reversePackageAll reverseResource) {
+            resourceGet = [("html", serveReverseFlat)]
+          }
+      , (extendResource $ reversePackageStats reverseResource) {
+            resourceGet = [("html", serveReverseStats)]
+          }
+      , (extendResource $ reversePackages reverseResource) {
+            resourceGet = [("html", serveReverseList)]
+          }
+      ]
+
+    serveReverse :: Bool -> DynamicPath -> ServerPartE Response
+    serveReverse isRecent dpath = do
+        pkgid <- packageInPath dpath
+        let pkgname = pkgName pkgid
+        rdisp <- case packageVersion pkgid of
+                  Version [] [] -> revPackageName pkgname
+                  _             -> withPackageVersion pkgid $ \_ -> revPackageId pkgid
+        render <- (if isRecent then renderReverseRecent else renderReverseOld) pkgname rdisp
+        return $ toResponse $ Resource.XHtml $ hackagePage (display pkgname ++ " - Reverse dependencies ") $
+            reversePackageRender pkgid (corePackageIdUri "") isRecent render
+
+    serveReverseFlat :: DynamicPath -> ServerPartE Response
+    serveReverseFlat dpath = do
+        pkg <- packageInPath dpath
+        let pkgname = pkgName pkg
+        revCount <- revPackageStats pkgname
+        pairs <- revPackageFlat pkgname
+        return $ toResponse $ Resource.XHtml $ hackagePage (display pkgname ++ "Flattened reverse dependencies") $
+            reverseFlatRender pkgname (corePackageNameUri "") revCount pairs
+
+    serveReverseStats :: DynamicPath -> ServerPartE Response
+    serveReverseStats dpath = do
+        pkg <- packageInPath dpath
+        let pkgname = pkgName pkg
+        pkgids <- lookupPackageName pkgname
+        revCount <- revPackageStats pkgname
+        return $ toResponse $ Resource.XHtml $ hackagePage (display pkgname ++ "Reverse dependency statistics") $
+            reverseStatsRender pkgname (map packageVersion pkgids) (corePackageIdUri "") revCount
+
+    serveReverseList :: DynamicPath -> ServerPartE Response
+    serveReverseList _ = do
+        triple <- revSummary
+        hackCount <- PackageIndex.indexSize <$> queryGetPackageIndex
+        return $ toResponse $ Resource.XHtml $ hackagePage "Reverse dependencies" $
+            reversePackagesRender (corePackageNameUri "") hackCount triple
