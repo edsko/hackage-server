@@ -31,7 +31,7 @@ import Distribution.Server.Features.Documentation       (initDocumentationFeatur
 import Distribution.Server.Features.BuildReports        (initBuildReportsFeature)
 import Distribution.Server.Features.LegacyRedirects     (legacyRedirectsFeature)
 import Distribution.Server.Features.PreferredVersions   (initVersionsFeature)
--- [reverse index disabled] import Distribution.Server.Features.ReverseDependencies (initReverseFeature)
+import Distribution.Server.Features.ReverseDependencies (initReverseFeature)
 import Distribution.Server.Features.DownloadCount       (initDownloadFeature)
 import Distribution.Server.Features.Tags                (initTagsFeature)
 import Distribution.Server.Features.Search              (initSearchFeature)
@@ -127,8 +127,8 @@ initHackageFeatures env@ServerEnv{serverVerbosity = verbosity} = do
                                initTagsFeature env
     mkVersionsFeature       <- logStartup "versions" $
                                initVersionsFeature env
-    -- mkReverseFeature     <- logStartup "reverse deps" $
-    --                         initReverseFeature env
+    mkReverseFeature     <- logStartup "reverse deps" $
+                            initReverseFeature env
     mkListFeature           <- logStartup "list" $
                                initListFeature env
     mkSearchFeature         <- logStartup "search" $
@@ -248,15 +248,14 @@ initHackageFeatures env@ServerEnv{serverVerbosity = verbosity} = do
                          uploadFeature
                          tagsFeature
 
-    {- [reverse index disabled]
     reverseFeature  <- mkReverseFeature
                          coreFeature
                          versionsFeature
-                         -}
+
 
     listFeature     <- mkListFeature
                          coreFeature
-                         -- [reverse index disabled] reverseFeature
+                         reverseFeature
                          downloadFeature
                          votesFeature
                          tagsFeature
@@ -277,7 +276,7 @@ initHackageFeatures env@ServerEnv{serverVerbosity = verbosity} = do
                          uploadFeature
                          candidatesFeature
                          versionsFeature
-                         -- [reverse index disabled] reverseFeature
+                         reverseFeature
                          tagsFeature
                          downloadFeature
                          votesFeature
